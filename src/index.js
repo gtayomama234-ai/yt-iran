@@ -10,6 +10,7 @@ const PROXY_IMAGE_HOSTS = [
   "yt3.googleusercontent.com"
 ];
 
+
 function isYouTubeHost(hostname) {
   return (
     hostname === "www.youtube.com" ||
