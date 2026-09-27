@@ -266,6 +266,10 @@ self.addEventListener(
       return;
     }
 
+    /*
+     * Only intercept Googlevideo
+     * requests.
+     */
     if (
       url.hostname !==
         "googlevideo.com" &&
@@ -278,9 +282,20 @@ self.addEventListener(
 
     event.respondWith(
       (async function () {
+
+        /*
+         * The original signed
+         * Googlevideo URL.
+         */
+        const videoURL =
+          request.url;
+
         const relayHeaders =
           new Headers();
 
+        /*
+         * Range.
+         */
         const range =
           request.headers.get(
             "Range"
@@ -293,6 +308,9 @@ self.addEventListener(
           );
         }
 
+        /*
+         * Accept.
+         */
         const accept =
           request.headers.get(
             "Accept"
@@ -305,6 +323,9 @@ self.addEventListener(
           );
         }
 
+        /*
+         * Accept-Language.
+         */
         const acceptLanguage =
           request.headers.get(
             "Accept-Language"
@@ -318,42 +339,60 @@ self.addEventListener(
         }
 
         /*
-         * Send the complete signed Googlevideo
-         * URL through the Worker POST request.
+         * Send the complete signed
+         * Googlevideo URL in the POST
+         * body.
          *
-         * It is placed both in the body and
-         * X-Video-URL so the Worker can recover
-         * it even if the request body is unavailable.
+         * We intentionally do not depend
+         * on X-Video-URL.
          */
-
-        relayHeaders.set(
-          "X-Video-URL",
-          request.url
-        );
-
         relayHeaders.set(
           "Content-Type",
           "text/plain;charset=UTF-8"
         );
 
-        const response =
-          await fetch(
-            new URL(
-              "/_video",
-              self.location.origin
-            ).toString(),
+        const relayURL =
+          self.location.origin +
+          "/_video";
+
+        try {
+
+          const response =
+            await fetch(
+              relayURL,
+              {
+                method: "POST",
+
+                headers:
+                  relayHeaders,
+
+                body:
+                  videoURL,
+
+                cache:
+                  "no-store"
+              }
+            );
+
+          return response;
+
+        } catch (error) {
+
+          return new Response(
+            "Video relay request failed:\n" +
+            String(error),
             {
-              method: "POST",
+              status: 502,
 
-              headers:
-                relayHeaders,
-
-              body:
-                request.url
+              headers: {
+                "Content-Type":
+                  "text/plain;charset=UTF-8"
+              }
             }
           );
 
-        return response;
+        }
+
       })()
     );
   }
@@ -576,13 +615,14 @@ export default {
       "/_video"
     ) {
       try {
-        let videoURL =
-          request.headers.get(
-            "X-Video-URL"
-          );
+
+        /*
+         * For POST requests the body is
+         * the primary source.
+         */
+        let videoURL = "";
 
         if (
-          !videoURL &&
           request.method ===
           "POST"
         ) {
@@ -590,13 +630,25 @@ export default {
             await request.text();
         }
 
-        if (
-          !videoURL
-        ) {
+        /*
+         * Header is only a fallback.
+         */
+        if (!videoURL) {
+          videoURL =
+            request.headers.get(
+              "X-Video-URL"
+            ) || "";
+        }
+
+        /*
+         * GET query string is the
+         * final fallback.
+         */
+        if (!videoURL) {
           videoURL =
             incoming.searchParams.get(
               "url"
-            );
+            ) || "";
         }
 
         if (!videoURL) {
