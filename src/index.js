@@ -10,7 +10,6 @@ const PROXY_IMAGE_HOSTS = [
   "yt3.googleusercontent.com"
 ];
 
-
 function isYouTubeHost(hostname) {
   return (
     hostname === "www.youtube.com" ||
@@ -319,16 +318,23 @@ self.addEventListener(
         }
 
         /*
-         * The browser normally cannot expose
-         * the YouTube cookies to this Worker
-         * because they belong to another domain.
+         * Send the complete signed Googlevideo
+         * URL through the Worker POST request.
          *
-         * The Cloudflare Worker adds the
-         * YOUTUBE_COOKIES Secret server-side.
-         *
-         * The full video URL is sent in the
-         * POST body instead of the query string.
+         * It is placed both in the body and
+         * X-Video-URL so the Worker can recover
+         * it even if the request body is unavailable.
          */
+
+        relayHeaders.set(
+          "X-Video-URL",
+          request.url
+        );
+
+        relayHeaders.set(
+          "Content-Type",
+          "text/plain;charset=UTF-8"
+        );
 
         const response =
           await fetch(
@@ -562,21 +568,31 @@ export default {
      * GET /_video?url=...
      *
      * POST /_video
+     *
+     * POST /_video with X-Video-URL
      */
     if (
       incoming.pathname ===
       "/_video"
     ) {
       try {
-        let videoURL;
+        let videoURL =
+          request.headers.get(
+            "X-Video-URL"
+          );
 
         if (
+          !videoURL &&
           request.method ===
           "POST"
         ) {
           videoURL =
             await request.text();
-        } else {
+        }
+
+        if (
+          !videoURL
+        ) {
           videoURL =
             incoming.searchParams.get(
               "url"
@@ -587,15 +603,42 @@ export default {
           return new Response(
             "Missing video URL",
             {
-              status: 400
+              status: 400,
+
+              headers: {
+                "Content-Type":
+                  "text/plain; charset=UTF-8",
+
+                "Cache-Control":
+                  "no-store"
+              }
             }
           );
         }
 
-        const videoTarget =
-          new URL(
-            videoURL
+        let videoTarget;
+
+        try {
+          videoTarget =
+            new URL(
+              videoURL
+            );
+        } catch {
+          return new Response(
+            "Invalid video URL",
+            {
+              status: 400,
+
+              headers: {
+                "Content-Type":
+                  "text/plain; charset=UTF-8",
+
+                "Cache-Control":
+                  "no-store"
+              }
+            }
           );
+        }
 
         if (
           !isGoogleVideoHost(
@@ -605,7 +648,15 @@ export default {
           return new Response(
             "Forbidden video host",
             {
-              status: 403
+              status: 403,
+
+              headers: {
+                "Content-Type":
+                  "text/plain; charset=UTF-8",
+
+                "Cache-Control":
+                  "no-store"
+              }
             }
           );
         }
