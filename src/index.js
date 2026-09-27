@@ -324,18 +324,25 @@ self.addEventListener(
          *
          * The Cloudflare Worker adds the
          * YOUTUBE_COOKIES Secret server-side.
+         *
+         * The full video URL is sent in the
+         * POST body instead of the query string.
          */
 
         const response =
           await fetch(
-            "/_video?url=" +
-            encodeURIComponent(
-              request.url
-            ),
+            new URL(
+              "/_video",
+              self.location.origin
+            ).toString(),
             {
-              method: "GET",
+              method: "POST",
+
               headers:
-                relayHeaders
+                relayHeaders,
+
+              body:
+                request.url
             }
           );
 
