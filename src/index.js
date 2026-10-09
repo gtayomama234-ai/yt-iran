@@ -1,4 +1,6 @@
 const YOUTUBE_ORIGIN = "https://www.youtube.com";
+const MOBILE_YOUTUBE_ORIGIN = "https://m.youtube.com";
+const CONSENT_ORIGIN = "https://consent.youtube.com";
 
 /* hi guys
 */
@@ -13,7 +15,8 @@ const PROXY_IMAGE_HOSTS = [
 function isYouTubeHost(hostname) {
   return (
     hostname === "www.youtube.com" ||
-    hostname === "youtube.com"
+    hostname === "youtube.com" ||
+    hostname === "m.youtube.com"
   );
 }
 
@@ -66,7 +69,8 @@ function decodeVideoURL(value) {
 
 function rewriteURL(
   value,
-  workerOrigin
+  workerOrigin,
+  baseOrigin = YOUTUBE_ORIGIN
 ) {
   if (!value) return value;
 
@@ -74,9 +78,30 @@ function rewriteURL(
     const url =
       new URL(
         value,
-        YOUTUBE_ORIGIN
+        baseOrigin
       );
 
+    /*
+     * Mobile YouTube must stay on
+     * the Worker under /_mobile/.
+     */
+    if (
+      url.hostname ===
+      "m.youtube.com"
+    ) {
+      return (
+        workerOrigin +
+        "/_mobile" +
+        url.pathname +
+        url.search +
+        url.hash
+      );
+    }
+
+    /*
+     * Main YouTube stays on the
+     * Worker root.
+     */
     if (
       isYouTubeHost(
         url.hostname
@@ -90,6 +115,27 @@ function rewriteURL(
       );
     }
 
+    /*
+     * Consent requests stay on
+     * the Worker under /_consent/.
+     */
+    if (
+      isConsentHost(
+        url.hostname
+      )
+    ) {
+      return (
+        workerOrigin +
+        "/_consent" +
+        url.pathname +
+        url.search +
+        url.hash
+      );
+    }
+
+    /*
+     * Proxy image requests.
+     */
     if (
       isImageHost(
         url.hostname
@@ -104,28 +150,17 @@ function rewriteURL(
       );
     }
 
+    /*
+     * Do not rewrite Googlevideo
+     * URLs here. The Service Worker
+     * intercepts them.
+     */
     if (
       isGoogleVideoHost(
         url.hostname
       )
     ) {
       return value;
-    }
-
-    if (
-      isConsentHost(
-        url.hostname
-      )
-    ) {
-      return (
-        workerOrigin +
-        "/_consent/" +
-        url.pathname.replace(
-          /^\/+/,
-          ""
-        ) +
-        url.search
-      );
     }
 
     return value;
@@ -542,7 +577,7 @@ export default {
       if (referer) {
         imageHeaders.set(
           "Referer",
-          "https://www.youtube.com/"
+          YOUTUBE_ORIGIN + "/"
         );
       }
 
@@ -821,7 +856,7 @@ export default {
          */
         videoHeaders.set(
           "Referer",
-          "https://www.youtube.com/"
+          YOUTUBE_ORIGIN + "/"
         );
 
         /*
@@ -918,8 +953,16 @@ export default {
 
     /*
      * Consent proxy.
+     *
+     * Browser URL:
+     * /_consent/...
+     *
+     * Worker upstream:
+     * consent.youtube.com/...
      */
     if (
+      incoming.pathname ===
+        "/_consent" ||
       incoming.pathname.startsWith(
         "/_consent/"
       )
@@ -928,10 +971,10 @@ export default {
         incoming.pathname.replace(
           /^\/_consent/,
           ""
-        );
+        ) || "/";
 
       const consentTarget =
-        "https://consent.youtube.com" +
+        CONSENT_ORIGIN +
         consentPath +
         incoming.search;
 
@@ -940,20 +983,18 @@ export default {
           request.headers
         );
 
-      consentHeaders.set(
-        "Host",
-        "consent.youtube.com"
+      consentHeaders.delete(
+        "Host"
       );
 
       consentHeaders.set(
         "Referer",
-        "https://www.youtube.com/"
+        YOUTUBE_ORIGIN + "/"
       );
 
       /*
        * Use the exported YouTube
-       * cookies when the browser does
-       * not provide Worker-domain cookies.
+       * cookies when configured.
        */
       if (
         env.YOUTUBE_COOKIES
@@ -1000,20 +1041,50 @@ export default {
         consentResponseHeaders
       );
 
-      const location =
+      /*
+       * Rewrite consent redirects so
+       * the browser never navigates to
+       * consent.youtube.com directly.
+       */
+      const consentLocation =
         consentResponseHeaders.get(
           "Location"
         );
 
-      if (location) {
+      if (consentLocation) {
         try {
           const redirectURL =
             new URL(
-              location,
-              "https://consent.youtube.com"
+              consentLocation,
+              CONSENT_ORIGIN
             );
 
           if (
+            isConsentHost(
+              redirectURL.hostname
+            )
+          ) {
+            consentResponseHeaders.set(
+              "Location",
+              incoming.origin +
+              "/_consent" +
+              redirectURL.pathname +
+              redirectURL.search +
+              redirectURL.hash
+            );
+          } else if (
+            redirectURL.hostname ===
+            "m.youtube.com"
+          ) {
+            consentResponseHeaders.set(
+              "Location",
+              incoming.origin +
+              "/_mobile" +
+              redirectURL.pathname +
+              redirectURL.search +
+              redirectURL.hash
+            );
+          } else if (
             isYouTubeHost(
               redirectURL.hostname
             )
@@ -1045,12 +1116,37 @@ export default {
     }
 
     /*
-     * Map the Worker request to YouTube.
+     * Detect requests routed through
+     * the mobile YouTube prefix.
      */
+    const isMobileRequest =
+      incoming.pathname ===
+        "/_mobile" ||
+      incoming.pathname.startsWith(
+        "/_mobile/"
+      );
+
+    const mobilePath =
+      isMobileRequest
+        ? incoming.pathname.replace(
+            /^\/_mobile/,
+            ""
+          ) || "/"
+        : incoming.pathname;
+
+    /*
+     * Map the request to the correct
+     * upstream YouTube host.
+     */
+    const upstreamOrigin =
+      isMobileRequest
+        ? MOBILE_YOUTUBE_ORIGIN
+        : YOUTUBE_ORIGIN;
+
     const target =
       new URL(
-        YOUTUBE_ORIGIN +
-        incoming.pathname +
+        upstreamOrigin +
+        mobilePath +
         incoming.search
       );
 
@@ -1085,9 +1181,8 @@ export default {
       );
     }
 
-    headers.set(
-      "Host",
-      "www.youtube.com"
+    headers.delete(
+      "Host"
     );
 
     if (
@@ -1095,7 +1190,7 @@ export default {
     ) {
       headers.set(
         "Origin",
-        YOUTUBE_ORIGIN
+        upstreamOrigin
       );
     }
 
@@ -1104,7 +1199,7 @@ export default {
     ) {
       headers.set(
         "Referer",
-        YOUTUBE_ORIGIN + "/"
+        upstreamOrigin + "/"
       );
     }
 
@@ -1160,7 +1255,9 @@ export default {
     );
 
     /*
-     * Rewrite YouTube redirects.
+     * Rewrite YouTube and consent
+     * redirects so the browser stays
+     * on the Worker hostname.
      */
     const location =
       responseHeaders.get(
@@ -1172,10 +1269,22 @@ export default {
         const redirectURL =
           new URL(
             location,
-            YOUTUBE_ORIGIN
+            upstreamOrigin
           );
 
         if (
+          redirectURL.hostname ===
+          "m.youtube.com"
+        ) {
+          responseHeaders.set(
+            "Location",
+            incoming.origin +
+            "/_mobile" +
+            redirectURL.pathname +
+            redirectURL.search +
+            redirectURL.hash
+          );
+        } else if (
           isYouTubeHost(
             redirectURL.hostname
           )
@@ -1187,9 +1296,7 @@ export default {
             redirectURL.search +
             redirectURL.hash
           );
-        }
-
-        if (
+        } else if (
           isConsentHost(
             redirectURL.hostname
           )
@@ -1199,7 +1306,8 @@ export default {
             incoming.origin +
             "/_consent" +
             redirectURL.pathname +
-            redirectURL.search
+            redirectURL.search +
+            redirectURL.hash
           );
         }
       } catch {}
@@ -1234,6 +1342,21 @@ export default {
         "content-security-policy-report-only"
       );
 
+      /*
+       * Resolve relative URLs against
+       * the actual upstream host.
+       */
+      const htmlBaseOrigin =
+        incoming.pathname ===
+          "/_consent" ||
+        incoming.pathname.startsWith(
+          "/_consent/"
+        )
+          ? CONSENT_ORIGIN
+          : isMobileRequest
+            ? MOBILE_YOUTUBE_ORIGIN
+            : YOUTUBE_ORIGIN;
+
       const rewriter =
         new HTMLRewriter()
 
@@ -1260,7 +1383,8 @@ export default {
                   "href",
                   rewriteURL(
                     href,
-                    incoming.origin
+                    incoming.origin,
+                    htmlBaseOrigin
                   )
                 );
               }
@@ -1279,7 +1403,8 @@ export default {
                   "src",
                   rewriteURL(
                     src,
-                    incoming.origin
+                    incoming.origin,
+                    htmlBaseOrigin
                   )
                 );
               }
@@ -1298,7 +1423,8 @@ export default {
                   "href",
                   rewriteURL(
                     href,
-                    incoming.origin
+                    incoming.origin,
+                    htmlBaseOrigin
                   )
                 );
               }
@@ -1317,7 +1443,8 @@ export default {
                   "src",
                   rewriteURL(
                     src,
-                    incoming.origin
+                    incoming.origin,
+                    htmlBaseOrigin
                   )
                 );
               }
@@ -1336,7 +1463,8 @@ export default {
                   "src",
                   rewriteURL(
                     src,
-                    incoming.origin
+                    incoming.origin,
+                    htmlBaseOrigin
                   )
                 );
               }
