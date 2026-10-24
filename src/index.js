@@ -271,7 +271,9 @@ function createVideoServiceWorker() {
 self.addEventListener(
   "install",
   function (event) {
-    self.skipWaiting();
+    event.waitUntil(
+      self.skipWaiting()
+    );
   }
 );
 
@@ -311,6 +313,16 @@ self.addEventListener(
       !url.hostname.endsWith(
         ".googlevideo.com"
       )
+    ) {
+      return;
+    }
+
+    /*
+     * Only proxy GET and HEAD requests.
+     */
+    if (
+      request.method !== "GET" &&
+      request.method !== "HEAD"
     ) {
       return;
     }
@@ -374,12 +386,23 @@ self.addEventListener(
         }
 
         /*
-         * Send the complete signed
-         * Googlevideo URL in the POST
-         * body.
-         *
-         * We intentionally do not depend
-         * on X-Video-URL.
+         * User-Agent.
+         */
+        const userAgent =
+          request.headers.get(
+            "User-Agent"
+          );
+
+        if (userAgent) {
+          relayHeaders.set(
+            "X-Video-User-Agent",
+            userAgent
+          );
+        }
+
+        /*
+         * The complete signed URL is
+         * sent in the POST body.
          */
         relayHeaders.set(
           "Content-Type",
@@ -649,6 +672,46 @@ export default {
       incoming.pathname ===
       "/_video"
     ) {
+      if (
+        request.method === "OPTIONS"
+      ) {
+        return new Response(
+          null,
+          {
+            status: 204,
+            headers: {
+              "Access-Control-Allow-Origin":
+                incoming.origin,
+
+              "Access-Control-Allow-Methods":
+                "GET, HEAD, POST, OPTIONS",
+
+              "Access-Control-Allow-Headers":
+                "Content-Type, Range, X-Video-Range, X-Video-Accept, X-Video-Accept-Language, X-Video-User-Agent, X-Video-URL",
+
+              "Access-Control-Max-Age":
+                "86400"
+            }
+          }
+        );
+      }
+
+      if (
+        request.method !== "POST" &&
+        request.method !== "GET" &&
+        request.method !== "HEAD"
+      ) {
+        return new Response(
+          "Method not allowed",
+          {
+            status: 405,
+            headers: {
+              "Allow": "GET, HEAD, POST, OPTIONS"
+            }
+          }
+        );
+      }
+
       try {
 
         /*
@@ -658,15 +721,14 @@ export default {
         let videoURL = "";
 
         if (
-          request.method ===
-          "POST"
+          request.method === "POST"
         ) {
           videoURL =
             await request.text();
         }
 
         /*
-         * Header is only a fallback.
+         * Header is a fallback.
          */
         if (!videoURL) {
           videoURL =
@@ -708,7 +770,7 @@ export default {
         try {
           videoTarget =
             new URL(
-              videoURL
+              videoURL.trim()
             );
         } catch {
           return new Response(
@@ -728,6 +790,7 @@ export default {
         }
 
         if (
+          videoTarget.protocol !== "https:" ||
           !isGoogleVideoHost(
             videoTarget.hostname
           )
@@ -752,11 +815,15 @@ export default {
           new Headers();
 
         /*
-         * Range.
+         * Forward the original Range
+         * header from the Service Worker.
          */
         const range =
           request.headers.get(
             "X-Video-Range"
+          ) ||
+          request.headers.get(
+            "Range"
           );
 
         if (range) {
@@ -771,6 +838,9 @@ export default {
          */
         const userAgent =
           request.headers.get(
+            "X-Video-User-Agent"
+          ) ||
+          request.headers.get(
             "User-Agent"
           );
 
@@ -778,6 +848,11 @@ export default {
           videoHeaders.set(
             "User-Agent",
             userAgent
+          );
+        } else {
+          videoHeaders.set(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
           );
         }
 
@@ -812,46 +887,6 @@ export default {
         }
 
         /*
-         * Cookie.
-         *
-         * Priority:
-         *
-         * 1. X-Video-Cookie
-         * 2. Worker YOUTUBE_COOKIES Secret
-         * 3. Browser Cookie
-         */
-        const videoCookie =
-          request.headers.get(
-            "X-Video-Cookie"
-          );
-
-        if (videoCookie) {
-          videoHeaders.set(
-            "Cookie",
-            videoCookie
-          );
-        } else if (
-          env.YOUTUBE_COOKIES
-        ) {
-          videoHeaders.set(
-            "Cookie",
-            env.YOUTUBE_COOKIES
-          );
-        } else {
-          const cookie =
-            request.headers.get(
-              "Cookie"
-            );
-
-          if (cookie) {
-            videoHeaders.set(
-              "Cookie",
-              cookie
-            );
-          }
-        }
-
-        /*
          * YouTube playback referer.
          */
         videoHeaders.set(
@@ -859,20 +894,37 @@ export default {
           YOUTUBE_ORIGIN + "/"
         );
 
+        videoHeaders.set(
+          "Accept-Encoding",
+          "identity"
+        );
+
+        videoHeaders.set(
+          "Cache-Control",
+          "no-cache"
+        );
+
         /*
-         * Fetch the actual UMP stream.
+         * Fetch the actual Googlevideo
+         * stream without caching it.
          */
         const videoResponse =
           await fetch(
             videoTarget.toString(),
             {
-              method: "GET",
+              method:
+                request.method === "HEAD"
+                  ? "HEAD"
+                  : "GET",
 
               headers:
                 videoHeaders,
 
               redirect:
-                "follow"
+                "follow",
+
+              cache:
+                "no-store"
             }
           );
 
@@ -880,6 +932,23 @@ export default {
           new Headers(
             videoResponse.headers
           );
+
+        /*
+         * Diagnostic headers: report the
+         * upstream response without exposing
+         * the signed video URL.
+         */
+        responseHeaders.set(
+          "X-Video-Upstream-Status",
+          String(videoResponse.status)
+        );
+
+        responseHeaders.set(
+          "X-Video-Upstream-Content-Type",
+          videoResponse.headers.get(
+            "content-type"
+          ) || ""
+        );
 
         responseHeaders.set(
           "Access-Control-Allow-Origin",
@@ -893,11 +962,45 @@ export default {
 
         responseHeaders.set(
           "Access-Control-Expose-Headers",
-          "Content-Length, Content-Range, Content-Type, Accept-Ranges"
+          "Content-Length, Content-Range, Content-Type, Accept-Ranges, X-Video-Upstream-Status, X-Video-Upstream-Content-Type"
         );
 
+        responseHeaders.set(
+          "Cache-Control",
+          "no-store"
+        );
+
+        /*
+         * Preserve range-related headers
+         * returned by Googlevideo.
+         */
+        for (
+          const headerName of [
+            "Accept-Ranges",
+            "Content-Range",
+            "Content-Length",
+            "Content-Type",
+            "ETag",
+            "Last-Modified"
+          ]
+        ) {
+          const value =
+            videoResponse.headers.get(
+              headerName
+            );
+
+          if (value !== null) {
+            responseHeaders.set(
+              headerName,
+              value
+            );
+          }
+        }
+
         return new Response(
-          videoResponse.body,
+          request.method === "HEAD"
+            ? null
+            : videoResponse.body,
           {
             status:
               videoResponse.status,
@@ -929,7 +1032,10 @@ export default {
                 "text/plain; charset=UTF-8",
 
               "Cache-Control":
-                "no-store"
+                "no-store",
+
+              "Access-Control-Allow-Origin":
+                incoming.origin
             }
           }
         );
@@ -1347,15 +1453,9 @@ export default {
        * the actual upstream host.
        */
       const htmlBaseOrigin =
-        incoming.pathname ===
-          "/_consent" ||
-        incoming.pathname.startsWith(
-          "/_consent/"
-        )
-          ? CONSENT_ORIGIN
-          : isMobileRequest
-            ? MOBILE_YOUTUBE_ORIGIN
-            : YOUTUBE_ORIGIN;
+        isMobileRequest
+          ? MOBILE_YOUTUBE_ORIGIN
+          : YOUTUBE_ORIGIN;
 
       const rewriter =
         new HTMLRewriter()
