@@ -437,7 +437,7 @@ self.addEventListener(
         } catch (error) {
 
           return new Response(
-            "Video relay request failed:\n" +
+            "Video relay request failed:\\n" +
             String(error),
             {
               status: 502,
