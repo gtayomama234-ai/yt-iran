@@ -151,9 +151,10 @@ function rewriteURL(
     }
 
     /*
-     * Do not rewrite Googlevideo
-     * URLs here. The Service Worker
-     * intercepts them.
+     * Leave Googlevideo URLs unchanged
+     * in HTML attributes. The Service
+     * Worker remains the fallback for
+     * video requests outside JSON.
      */
     if (
       isGoogleVideoHost(
@@ -199,6 +200,106 @@ function rewriteImageURLsInText(
   }
 
   return text;
+}
+
+/*
+ * Rewrite direct Googlevideo URLs found
+ * inside YouTube JSON/API responses.
+ *
+ * The complete signed URL is encoded
+ * as the "url" query parameter.
+ */
+function rewriteGoogleVideoURL(
+  value,
+  workerOrigin
+) {
+  if (
+    typeof value !== "string" ||
+    !value
+  ) {
+    return value;
+  }
+
+  try {
+    const url =
+      new URL(value);
+
+    if (
+      url.protocol === "https:" &&
+      isGoogleVideoHost(
+        url.hostname
+      )
+    ) {
+      return (
+        workerOrigin +
+        "/_video?url=" +
+        encodeURIComponent(value)
+      );
+    }
+  } catch {}
+
+  return value;
+}
+
+/*
+ * Recursively rewrite strings inside
+ * a parsed JSON response.
+ *
+ * This handles nested objects and arrays
+ * such as YouTube player responses.
+ */
+function rewriteVideoURLsInJSON(
+  value,
+  workerOrigin
+) {
+  if (typeof value === "string") {
+    const videoURL =
+      rewriteGoogleVideoURL(
+        value,
+        workerOrigin
+      );
+
+    if (videoURL !== value) {
+      return videoURL;
+    }
+
+    return rewriteImageURLsInText(
+      value,
+      workerOrigin
+    );
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(
+      item =>
+        rewriteVideoURLsInJSON(
+          item,
+          workerOrigin
+        )
+    );
+  }
+
+  if (
+    value !== null &&
+    typeof value === "object"
+  ) {
+    const rewritten = {};
+
+    for (
+      const [key, item] of
+      Object.entries(value)
+    ) {
+      rewritten[key] =
+        rewriteVideoURLsInJSON(
+          item,
+          workerOrigin
+        );
+    }
+
+    return rewritten;
+  }
+
+  return value;
 }
 
 /*
@@ -1589,8 +1690,9 @@ export default {
     }
 
     /*
-     * Rewrite image URLs inside
-     * YouTube JSON/API responses.
+     * Rewrite direct video URLs and
+     * image URLs inside YouTube JSON/API
+     * responses.
      */
     if (
       contentType.includes(
@@ -1600,12 +1702,6 @@ export default {
       const text =
         await response.text();
 
-      const rewritten =
-        rewriteImageURLsInText(
-          text,
-          incoming.origin
-        );
-
       responseHeaders.delete(
         "content-length"
       );
@@ -1613,6 +1709,35 @@ export default {
       responseHeaders.delete(
         "content-encoding"
       );
+
+      let rewritten = text;
+
+      try {
+        const json =
+          JSON.parse(text);
+
+        const updatedJSON =
+          rewriteVideoURLsInJSON(
+            json,
+            incoming.origin
+          );
+
+        rewritten =
+          JSON.stringify(
+            updatedJSON
+          );
+      } catch {
+        /*
+         * Preserve the original JSON text
+         * if parsing fails. Still rewrite
+         * image URLs as before.
+         */
+        rewritten =
+          rewriteImageURLsInText(
+            text,
+            incoming.origin
+          );
+      }
 
       return new Response(
         rewritten,
