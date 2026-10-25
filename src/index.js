@@ -405,15 +405,14 @@ self.addEventListener(
     }
 
     /*
-     * Only intercept Googlevideo
-     * requests.
+     * Only intercept actual video playback.
+     * Ignore connectivity checks.
      */
     if (
-      url.hostname !==
-        "googlevideo.com" &&
       !url.hostname.endsWith(
         ".googlevideo.com"
-      )
+      ) ||
+      url.pathname !== "/videoplayback"
     ) {
       return;
     }
